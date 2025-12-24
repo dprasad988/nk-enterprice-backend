@@ -1,9 +1,8 @@
 package com.hardwarepos.controller;
 
-import com.hardwarepos.entity.Store;
-import com.hardwarepos.repository.StoreRepository;
+import com.hardwarepos.entity.UserSession;
+import com.hardwarepos.repository.UserSessionRepository;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.web.bind.annotation.CrossOrigin;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RestController;
@@ -11,14 +10,14 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 @RestController
-@RequestMapping("/api/stores")
-public class StoreController {
+@RequestMapping("/api/sessions")
+public class SessionController {
 
     @Autowired
-    private StoreRepository storeRepository;
+    private UserSessionRepository userSessionRepository;
 
     @GetMapping
-    public List<Store> getAllStores() {
-        return storeRepository.findAll();
+    public List<UserSession> getAllSessions() {
+        return userSessionRepository.findAllByOrderByLoginTimeDesc();
     }
 }

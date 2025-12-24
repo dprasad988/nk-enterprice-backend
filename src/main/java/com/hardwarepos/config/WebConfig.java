@@ -13,7 +13,8 @@ public class WebConfig implements WebMvcConfigurer {
         registry.addMapping("/**")
                 .allowedOrigins(
                     "http://localhost:5173", 
-                    "https://nk-enterprice.vercel.app"
+                    "https://nk-enterprice.vercel.app",
+                    "https://nk-enterprice.duckdns.org"
                 )
                 .allowedMethods("GET", "POST", "PUT", "DELETE", "OPTIONS")
                 .allowedHeaders("*")

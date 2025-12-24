@@ -10,6 +10,9 @@ public interface SaleRepository extends JpaRepository<Sale, Long> {
     List<Sale> findAllByStoreIdOrderBySaleDateDesc(Long storeId);
     List<Sale> findByStoreId(Long storeId);
 
+    List<Sale> findAllBySaleDateBetweenOrderBySaleDateDesc(java.time.LocalDateTime start, java.time.LocalDateTime end);
+    List<Sale> findAllByStoreIdAndSaleDateBetweenOrderBySaleDateDesc(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
+
     @org.springframework.data.jpa.repository.Query("SELECT SUM(s.totalAmount) FROM Sale s")
     Double sumTotalSalesGlobal();
 
@@ -38,4 +41,16 @@ public interface SaleRepository extends JpaRepository<Sale, Long> {
 
     @org.springframework.data.jpa.repository.Query("SELECT i.productName, SUM(i.quantity) as totalQty FROM SaleItem i JOIN i.sale s WHERE s.storeId = :storeId GROUP BY i.productName ORDER BY totalQty DESC")
     org.springframework.data.domain.Page<Object[]> findTopSellingProductsByStore(Long storeId, org.springframework.data.domain.Pageable pageable);
+    // Aggregation for Profit Calculation (Revenue - Cost)
+    @org.springframework.data.jpa.repository.Query("SELECT SUM(s.totalAmount) FROM Sale s WHERE s.saleDate BETWEEN :start AND :end")
+    Double sumTotalAmountByDateRange(java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT SUM(s.totalAmount) FROM Sale s WHERE s.storeId = :storeId AND s.saleDate BETWEEN :start AND :end")
+    Double sumTotalAmountByStoreAndDateRange(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT SUM(i.costPrice * i.quantity) FROM SaleItem i JOIN i.sale s WHERE s.saleDate BETWEEN :start AND :end")
+    Double sumTotalCostByDateRange(java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT SUM(i.costPrice * i.quantity) FROM SaleItem i JOIN i.sale s WHERE s.storeId = :storeId AND s.saleDate BETWEEN :start AND :end")
+    Double sumTotalCostByStoreAndDateRange(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
 }
