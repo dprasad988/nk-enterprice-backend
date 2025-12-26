@@ -18,6 +18,7 @@ import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Set; // Added import
 import java.util.stream.Collectors;
 
 @Service
@@ -32,28 +33,90 @@ public class ReportService {
     @Autowired
     private VoucherRepository voucherRepository;
 
-    public DailySalesReportDTO getDailySalesReport(LocalDate date, Long storeId) {
+    @Autowired
+    private com.hardwarepos.repository.ProductRepository productRepository;
+    @Autowired
+    private com.hardwarepos.repository.SaleVersionRepository saleVersionRepository;
+
+    public DailySalesReportDTO getDailySalesReport(LocalDate date, Long storeId, int page, int size, String search, String status) {
         LocalDateTime startOfDay = date.atStartOfDay();
         LocalDateTime endOfDay = date.atTime(LocalTime.MAX);
 
-        List<Sale> sales;
+        // 1. Calculate Daily Summaries (Global for the day)
+        Double dayRevenue;
+        Double dayCost;
+        
         if (storeId != null) {
-            sales = saleRepository.findAllByStoreIdAndSaleDateBetweenOrderBySaleDateDesc(storeId, startOfDay, endOfDay);
-            // Hint: ensure repository method exists or use generic find attributes
+            dayRevenue = saleRepository.sumTotalAmountByStoreAndDateRange(storeId, startOfDay, endOfDay);
+            dayCost = saleRepository.sumTotalCostByStoreAndDateRange(storeId, startOfDay, endOfDay);
         } else {
-             // For Owner view of ALL stores? Or strictly one store? 
-             // Logic in SaleService suggests Owner can see all.
-             sales = saleRepository.findAllBySaleDateBetweenOrderBySaleDateDesc(startOfDay, endOfDay);
+            dayRevenue = saleRepository.sumTotalAmountByDateRange(startOfDay, endOfDay);
+            dayCost = saleRepository.sumTotalCostByDateRange(startOfDay, endOfDay);
         }
-
-        double totalSales = 0.0;
-        double totalProfit = 0.0;
-        int totalBills = sales.size();
-        int totalReturns = 0;
-
+        
+        // Handle nulls and calculate profit
+        dayRevenue = dayRevenue != null ? dayRevenue : 0.0;
+        dayCost = dayCost != null ? dayCost : 0.0;
+        double dayProfit = dayRevenue - dayCost;
+        
+        // Retrieve Paginated Data
+        org.springframework.data.domain.Pageable pageRequest = org.springframework.data.domain.PageRequest.of(page, size);
+        
+        String searchPattern = null;
+        Long searchId = null;
+        
+        if (search != null && !search.trim().isEmpty()) {
+            searchPattern = "%" + search.toLowerCase() + "%";
+            try {
+                searchId = Long.parseLong(search.trim());
+            } catch (NumberFormatException e) {
+                // Not a number, so not an ID search
+                searchId = null;
+            }
+        }
+        
+        org.springframework.data.domain.Page<Sale> salesPage = saleRepository.findDailySales(
+            startOfDay, endOfDay, storeId, 
+            searchPattern,
+            searchId,
+            status, 
+            pageRequest
+        );
+        
         List<BillReportDTO> billReports = new ArrayList<>();
+        for (Sale sale : salesPage.getContent()) {
+            billReports.add(convertToBillReportDTO(sale));
+        }
+        
+        // Pagination Metadata
+        int totalPages = salesPage.getTotalPages();
+        long totalElements = salesPage.getTotalElements();
+        
+        // Fetch accurate Daily Global Stats (not affected by search/status filter)
+        Long totalBills;
+        Long totalReturns;
+        
+        if (storeId != null) {
+            totalBills = saleRepository.countTransactionsByStoreAndDateRange(storeId, startOfDay, endOfDay);
+            totalReturns = saleRepository.countReturnsByStoreAndDateRange(storeId, startOfDay, endOfDay);
+        } else {
+            totalBills = saleRepository.countTransactionsByDateRange(startOfDay, endOfDay);
+            totalReturns = saleRepository.countReturnsByDateRange(startOfDay, endOfDay);
+        }
+        
+        return new DailySalesReportDTO(
+            dayRevenue, 
+            dayProfit, 
+            totalBills != null ? totalBills.intValue() : 0, 
+            totalReturns != null ? totalReturns.intValue() : 0, 
+            page, 
+            totalPages, 
+            totalElements, 
+            billReports
+        );
+    }
 
-        for (Sale sale : sales) {
+    private BillReportDTO convertToBillReportDTO(Sale sale) {
             BillReportDTO billDTO = new BillReportDTO();
             billDTO.setSaleId(sale.getId());
             billDTO.setBillNo(String.valueOf(sale.getId()));
@@ -62,29 +125,21 @@ public class ReportService {
             billDTO.setTotalAmount(sale.getTotalAmount());
             billDTO.setPaymentMethod(sale.getPaymentMethod());
             
-            // Determine Exchange
-            // Logic: if audit log says "Exchanged" or if PaymentMethod has "PARTIAL VOUCHER"?
-            // Or simpler: check if payment method contains "VOUCHER" logic?
-            // Actually user asked "how it make sence for profit". So explicit flag is good.
-            // For now, assume based on pm string or if updated.
-            billDTO.setIsExchange(sale.getPaymentMethod().contains("VOUCHER")); 
-            billDTO.setIsVoucherUsed(sale.getPaymentMethod().contains("VOUCHER"));
-
-            // Calculate Profit & Items
+            // Get History (SaleVersions) 
+            List<com.hardwarepos.entity.SaleVersion> versions = saleVersionRepository.findBySaleIdOrderByVersionAtDesc(sale.getId());
+            boolean hasHistory = !versions.isEmpty();
+            boolean isVoucherPayment = sale.getPaymentMethod() != null && sale.getPaymentMethod().contains("VOUCHER");
+            
+            billDTO.setIsExchange(hasHistory || isVoucherPayment); 
+            billDTO.setIsVoucherUsed(isVoucherPayment);
+            
             double billProfit = 0.0;
             List<BillItemDTO> itemDTOs = new ArrayList<>();
             
-            // Check for Returns (DamageItems linked to THIS sale)
             List<DamageItem> returns = damageItemRepository.findByOriginalSaleId(sale.getId());
             boolean hasReturns = !returns.isEmpty();
-            if (hasReturns) totalReturns++;
             billDTO.setHasReturns(hasReturns);
-
-            // Check Voucher Link (from returns)
-            // If any return has status VOUCHER_ISSUED, find that voucher
-            // Note: Multiple items might return -> One voucher? Or multiple?
-            // Usually grouped. 
-            // Let's find any unique voucher code in the DamageItems
+            
             String voucherCode = returns.stream()
                 .filter(d -> d.getStatus().equals("VOUCHER_ISSUED") && d.getVoucherCode() != null)
                 .map(DamageItem::getVoucherCode)
@@ -93,8 +148,20 @@ public class ReportService {
             billDTO.setVoucherCode(voucherCode);
             if (voucherCode != null) {
                 voucherRepository.findByCode(voucherCode).ifPresent(v -> {
-                    billDTO.setVoucherStatus(v.getStatus()); // ISSUED or REDEEMED
+                    billDTO.setVoucherStatus(v.getStatus()); 
                 });
+            }
+
+            java.util.Map<String, Integer> previousQuantities = new java.util.HashMap<>();
+            if (!versions.isEmpty()) {
+                com.hardwarepos.entity.SaleVersion previousState = versions.get(0); 
+                if (previousState.getItems() != null) {
+                    for (com.hardwarepos.entity.SaleVersionItem pItem : previousState.getItems()) {
+                         String barcode = (pItem.getBarcode() != null && !pItem.getBarcode().isEmpty()) ? " [" + pItem.getBarcode() + "]" : "";
+                         String sig = pItem.getProductName() + barcode;
+                         previousQuantities.merge(sig, pItem.getQuantity(), Integer::sum);
+                    }
+                }
             }
 
             if (sale.getItems() != null) {
@@ -103,9 +170,12 @@ public class ReportService {
                     itemDTO.setProductName(item.getProductName());
                     itemDTO.setQuantity(item.getQuantity());
                     
+                    if (item.getProductId() != null) {
+                        productRepository.findById(item.getProductId())
+                            .ifPresent(p -> itemDTO.setBarcode(p.getBarcode()));
+                    }
+                    
                     double finalPrice = item.getPrice();
-                    // Apply item discount if any? Logic in SaleService creates subtotal immediately.
-                    // But we store 'discount' on item (percentage).
                     if (item.getDiscount() != null && item.getDiscount() > 0) {
                         finalPrice = item.getPrice() * (1 - item.getDiscount() / 100.0);
                         itemDTO.setDiscountPercent(item.getDiscount());
@@ -116,87 +186,55 @@ public class ReportService {
                     itemDTO.setPrice(finalPrice);
                     itemDTO.setCost(item.getCostPrice() != null ? item.getCostPrice() : 0.0);
                     
-                    // Profit = (Selling - Cost) * Qty
-                    // Wait, must also account for Bill-level discount?
-                    // Usually bill discount reduces total.
-                    // Let's calculate Gross Item Profit first.
                     double itemProfit = (finalPrice - itemDTO.getCost()) * item.getQuantity();
                     itemDTO.setProfit(itemProfit);
+                    itemDTO.setIsReturned(false); 
+                    
+                    String currentSig = item.getProductName() + (itemDTO.getBarcode() != null ? " [" + itemDTO.getBarcode() + "]" : "");
+                    
+                    if (!versions.isEmpty()) {
+                        int prevQty = previousQuantities.getOrDefault(currentSig, 0);
+                        int currentQty = item.getQuantity();
+                        
+                        if (prevQty == 0) {
+                            itemDTO.setIsNew(true);
+                            itemDTO.setAddedQuantity(currentQty);
+                        } else if (currentQty > prevQty) {
+                            itemDTO.setIsNew(true);
+                            itemDTO.setAddedQuantity(currentQty - prevQty);
+                        } else {
+                            itemDTO.setIsNew(false);
+                            itemDTO.setAddedQuantity(0);
+                        }
+                    } else {
+                        itemDTO.setIsNew(false);
+                        itemDTO.setAddedQuantity(0);
+                    }
 
-
-                    // Check if this specific item was returned?
-                    // We have `returns` list. Matches ProductID.
-                    // If returned, we should NOT count it in profit? 
-                    // Or display it as returned?
-                    // User asked "if a bill had return... how it make sence for profit"
-                    // Ideally: Profit = Revenue - Cost.
-                    // If returned & voucher issued: Revenue is effectively retained (as voucher liability), but goods are back (bad stock).
-                    // If "Damaged", the cost is LOST (Loss).
-                    // Logic:
-                    // 1. Sale happened. +Profit.
-                    // 2. Return (Damaged). -Revenue (Voucher refund) AND -Cost (Item destroyed/loss).
-                    // Actually, if damaged, we lost the item cost.
-                    // And if we gave a voucher, we effectively gave back the revenue.
-                    // So Profit = 0 (Revenue - Refund) - Cost (Product Cost). = -Cost.
-                    // BUT, `DailySalesReport` is for a SPECIFIC DATE.
-                    // If the return happened LATER (another day), does it affect TODAY's report?
-                    // User said "track full details day by day".
-                    // If I look at strict "Sales on Day X", the profit WAS made on Day X.
-                    // The return is a separate event that might happen on Day Y.
-                    // However, showing the *current* status of that bill (even if returned later) is helpful context.
-                    // BUT strictly changing the "Total Profit" of Day X because of a return on Day Y is controversial accounting.
-                    // USUALLY: Sales Report for Day X shows the sales AS THEY HAPPENED.
-                    // Returns are separate negative entries on the day they happen.
-                    
-                    // COMPROMISE:
-                    // 1. Show the ORIGINAL profit of the sale.
-                    // 2. Show "Has Return" flag.
-                    // 3. DO NOT deduct from "Total Profit" of Day X if the return happened later.
-                    // 4. IF the return happened TODAY, maybe deduct?
-                    // Complexity: Logic for "return date".
-                    // Let's stick to: "Profit from Deal".
-                    // Report shows the sale's financial result.
-                    // If I return it, the sale is effectively cancelled/reversed.
-                    // I will SUBTRACT returned items from the bill's profit for display purposes to show "Realized Profit".
-                    // Note: If damaged, we lose the cost.
-                    
-                    // Simple Logic for now:
-                    // Profit = Sum(ItemProfit).
-                    // If Bill Level Discount > 0:
-                    // Net Profit = Sum(ItemProfit) - (Total * Discount / 100).
-                    
-                    // Mark item as returned if matched in `returns`
-                    boolean isReturned = returns.stream().anyMatch(r -> r.getProductId().equals(item.getProductId()));
-                    itemDTO.setIsReturned(isReturned);
-                    
                     itemDTOs.add(itemDTO);
                     billProfit += itemProfit;
                 }
             }
 
-            // Deduct Bill Global Discount
+            for (DamageItem returnedItem : returns) {
+                boolean alreadyInList = itemDTOs.stream().anyMatch(dto -> dto.getProductName().equals(returnedItem.getProductName()) && dto.getIsReturned());
+                if (!alreadyInList) {
+                    BillItemDTO returnDTO = new BillItemDTO();
+                    returnDTO.setProductName(returnedItem.getProductName() + " (Returned)"); 
+                    returnDTO.setQuantity(returnedItem.getQuantity());
+                    returnDTO.setPrice(returnedItem.getRefundAmount() / returnedItem.getQuantity()); 
+                    returnDTO.setCost(0.0); 
+                    returnDTO.setDiscountPercent(0.0);
+                    returnDTO.setProfit(0.0); 
+                    returnDTO.setIsReturned(true);
+                    
+                    itemDTOs.add(returnDTO);
+                }
+            }
+
             if (sale.getDiscount() != null && sale.getDiscount() > 0) {
-                 double discountAmount = sale.getTotalAmount() * (sale.getDiscount() / 100.0);
-                 // Wait, totalAmount is AFTER discount in basic logic?
-                 // Sale.totalAmount usually stores final.
-                 // Let's check `SaleService` create.
-                 // `total = subtotal - (subtotal * (discount / 100));`
-                 // So `totalAmount` is Net.
-                 // My `itemProfit` calculation used `finalPrice` (item level).
-                 // It did NOT account for Global Discount.
-                 // So I must subtract the Global Discount value from the aggregated item profit.
-                 // Global Discount Value = Sum(ItemSubtotals) * (GlobalRate/100).
-                 // Approximation: (GrossProfit) - (Global Discount Amount).
-                 // Wait, Global Discount reduces Revenue. Cost stays same.
-                 // So Profit reduces by exactly the Discount Amount.
-                 // We need to calculate the Discount Amount.
-                 // `subtotal` isn't stored in Sale, only Total.
-                 // `Total = Subtotal * (1 - rate)`.
-                 // `Subtotal = Total / (1 - rate)`.
-                 // `DiscountAmt = Subtotal - Total`.
-                 
                  double r = sale.getDiscount() / 100.0;
-                 if (r < 1.0) { // Safety
+                 if (r < 1.0) { 
                      double impliedSubtotal = sale.getTotalAmount() / (1.0 - r);
                      double discountVal = impliedSubtotal - sale.getTotalAmount();
                      billProfit -= discountVal;
@@ -205,13 +243,7 @@ public class ReportService {
             
             billDTO.setProfit(billProfit);
             billDTO.setItems(itemDTOs);
-            billReports.add(billDTO);
-
-            totalSales += sale.getTotalAmount();
-            totalProfit += billProfit;
-        }
-
-        return new DailySalesReportDTO(totalSales, totalProfit, totalBills, totalReturns, billReports);
+            return billDTO;
     }
     public com.hardwarepos.dto.ProfitReportDTO getProfitSummary(Long storeId, String chartRange) {
         LocalDate today = LocalDate.now();

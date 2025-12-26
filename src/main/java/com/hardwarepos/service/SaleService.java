@@ -2,6 +2,8 @@ package com.hardwarepos.service;
 
 import com.hardwarepos.entity.Sale;
 import com.hardwarepos.entity.SaleItem;
+import com.hardwarepos.entity.SaleVersion;
+import com.hardwarepos.entity.SaleVersionItem;
 import com.hardwarepos.entity.SaleAuditLog;
 import com.hardwarepos.entity.User;
 import com.hardwarepos.repository.DamageItemRepository;
@@ -9,6 +11,7 @@ import com.hardwarepos.repository.InventoryRepository;
 import com.hardwarepos.repository.ProductRepository;
 import com.hardwarepos.repository.SaleAuditLogRepository;
 import com.hardwarepos.repository.SaleRepository;
+import com.hardwarepos.repository.SaleVersionRepository;
 import com.hardwarepos.repository.UserRepository;
 import com.hardwarepos.repository.VoucherRepository;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -20,6 +23,7 @@ import org.springframework.transaction.annotation.Transactional;
 
 import java.time.LocalDateTime;
 import java.util.List;
+import java.util.ArrayList;
 
 @Service
 public class SaleService {
@@ -41,6 +45,11 @@ public class SaleService {
 
     @Autowired
     private SaleAuditLogRepository saleAuditLogRepository;
+
+
+
+    @Autowired
+    private SaleVersionRepository saleVersionRepository;
 
     @Autowired
     private DamageItemRepository damageItemRepository;
@@ -139,7 +148,7 @@ public class SaleService {
                     inventory.setStock(newStock);
                     inventoryRepository.save(inventory);
 
-                    item.setCostPrice(inventory.getCostPrice());
+                    item.setCostPrice(inventory.getCostPrice() != null ? inventory.getCostPrice() : 0.0);
                     if (item.getProductName() == null || item.getProductName().isEmpty()) {
                         item.setProductName(inventory.getProduct().getName());
                     }
@@ -203,11 +212,57 @@ public class SaleService {
         return savedSale;
     }
 
+    private void saveSaleVersion(Sale sale, String reason) {
+        SaleVersion version = new SaleVersion();
+        version.setSale(sale);
+        version.setVersionAt(LocalDateTime.now());
+        version.setVersionReason(reason);
+        version.setTotalAmount(sale.getTotalAmount());
+        version.setPaymentMethod(sale.getPaymentMethod());
+        version.setCashierName(sale.getCashierName());
+        version.setDiscount(sale.getDiscount());
+
+        List<SaleVersionItem> versionItems = new ArrayList<>();
+        if (sale.getItems() != null) {
+            for (SaleItem item : sale.getItems()) {
+                SaleVersionItem vItem = new SaleVersionItem();
+                vItem.setSaleVersion(version);
+                vItem.setProductId(item.getProductId());
+                vItem.setProductName(item.getProductName());
+                
+                // Fetch barcode manually since SaleItem doesn't strictly have it separately? 
+                // Or try to get it. Ideally SaleItem should have it, but if not we fetch.
+                if (item.getProductId() != null) {
+                     productRepository.findById(item.getProductId())
+                         .ifPresent(p -> vItem.setBarcode(p.getBarcode()));
+                }
+                // Removed the line that overwrites it with empty string
+                // vItem.setBarcode(barcode);
+
+                vItem.setQuantity(item.getQuantity());
+                vItem.setPrice(item.getPrice());
+                vItem.setCostPrice(item.getCostPrice());
+                vItem.setDiscount(item.getDiscount());
+                vItem.setSubtotal(item.getSubtotal());
+                versionItems.add(vItem);
+            }
+        }
+        version.setItems(versionItems);
+        saleVersionRepository.save(version);
+    }
+
     @Transactional
     public Sale updateSale(User user, Long id, Sale updatedSale) {
         Sale existingSale = saleRepository.findById(id)
                 .orElseThrow(() -> new RuntimeException("Sale not found"));
 
+        // SNAPSHOT OLD STATE FOR HISTORY
+        // Check if this is the FIRST update. If so, logic implies the CURRENT state is the "ORIGINAL".
+        // Or "PRE-UPDATE 1". 
+        // We just save the current state of 'existingSale' as a version.
+        saveSaleVersion(existingSale, "PRE-UPDATE / EXCHANGE");
+        
+        // Restore stock logic (RETURN Items logic)
         if (existingSale.getItems() != null) {
             for (SaleItem oldItem : existingSale.getItems()) {
                 if (oldItem.getProductId() != null) {
@@ -236,6 +291,12 @@ public class SaleService {
                     }
                     inventory.setStock(newStock);
                     inventoryRepository.save(inventory);
+
+                    newItem.setCostPrice(inventory.getCostPrice() != null ? inventory.getCostPrice() : 0.0);
+                }
+                
+                if (newItem.getPrice() != null && newItem.getQuantity() != null) {
+                        newItem.setSubtotal(newItem.getPrice() * newItem.getQuantity());
                 }
             }
         }
@@ -243,16 +304,6 @@ public class SaleService {
         if (updatedSale.getTotalAmount() < existingSale.getTotalAmount()) {
              throw new RuntimeException("Exchange Error: New total (" + updatedSale.getTotalAmount() + 
                      ") cannot be less than original total (" + existingSale.getTotalAmount() + "). Customer must add more items.");
-        }
-
-        existingSale.setTotalAmount(updatedSale.getTotalAmount());
-        existingSale.setPaymentMethod(updatedSale.getPaymentMethod());
-        existingSale.setCashierName(user.getUsername());
-        existingSale.setSaleDate(LocalDateTime.now());
-        
-        existingSale.getItems().clear();
-        if (updatedSale.getItems() != null) {
-            existingSale.getItems().addAll(updatedSale.getItems());
         }
 
         if (updatedSale.getPaymentMethod() != null && !updatedSale.getPaymentMethod().equals(existingSale.getPaymentMethod())) {
@@ -274,10 +325,38 @@ public class SaleService {
                     
                     String otherMethod = parts.length > 1 ? " + " + parts[1] : "";
                     existingSale.setPaymentMethod("VOUCHER (" + vCode + "): " + deductAmount + otherMethod);
+                    updatedSale.setPaymentMethod(existingSale.getPaymentMethod()); 
+
                 } catch (Exception e) {
                     throw new RuntimeException("Error processing voucher: " + e.getMessage());
                 }
+            } else if (pm.startsWith("VOUCHER_CODE:")) {
+                String vCode = pm.split(":")[1].trim();
+                com.hardwarepos.entity.Voucher voucher = this.voucherRepository.findByCode(vCode)
+                     .orElseThrow(() -> new RuntimeException("Invalid Voucher Code during Exchange"));
+                     
+                double deduction = existingSale.getTotalAmount();
+                if (voucher.getCurrentBalance() < deduction) {
+                    throw new RuntimeException("Insufficient Voucher Balance");
+                }
+                
+                voucher.setCurrentBalance(0.0);
+                voucher.setStatus("REDEEMED");
+                this.voucherRepository.save(voucher);
+                
+                existingSale.setPaymentMethod("VOUCHER (" + vCode + ")");
+                updatedSale.setPaymentMethod(existingSale.getPaymentMethod());
             }
+        }
+
+        existingSale.setTotalAmount(updatedSale.getTotalAmount());
+        existingSale.setPaymentMethod(updatedSale.getPaymentMethod());
+        existingSale.setCashierName(user.getUsername());
+        existingSale.setSaleDate(LocalDateTime.now());
+        
+        existingSale.getItems().clear();
+        if (updatedSale.getItems() != null) {
+            existingSale.getItems().addAll(updatedSale.getItems());
         }
 
         Sale savedSale = saleRepository.save(existingSale);
@@ -309,5 +388,9 @@ public class SaleService {
         } else {
             return saleAuditLogRepository.findAllByOrderByTimestampDesc(pageable);
         }
+    }
+
+    public List<SaleVersion> getSaleVersions(Long saleId) {
+        return saleVersionRepository.findBySaleIdOrderByVersionAtDesc(saleId);
     }
 }

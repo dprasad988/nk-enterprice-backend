@@ -53,4 +53,41 @@ public interface SaleRepository extends JpaRepository<Sale, Long> {
 
     @org.springframework.data.jpa.repository.Query("SELECT SUM(i.costPrice * i.quantity) FROM SaleItem i JOIN i.sale s WHERE s.storeId = :storeId AND s.saleDate BETWEEN :start AND :end")
     Double sumTotalCostByStoreAndDateRange(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT COUNT(s) FROM Sale s WHERE s.saleDate BETWEEN :start AND :end")
+    Long countTransactionsByDateRange(java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT COUNT(s) FROM Sale s WHERE s.storeId = :storeId AND s.saleDate BETWEEN :start AND :end")
+    Long countTransactionsByStoreAndDateRange(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT COUNT(s) FROM Sale s WHERE s.saleDate BETWEEN :start AND :end AND EXISTS (SELECT d FROM DamageItem d WHERE d.originalSaleId = s.id)")
+    Long countReturnsByDateRange(java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT COUNT(s) FROM Sale s WHERE s.storeId = :storeId AND s.saleDate BETWEEN :start AND :end AND EXISTS (SELECT d FROM DamageItem d WHERE d.originalSaleId = s.id)")
+    Long countReturnsByStoreAndDateRange(Long storeId, java.time.LocalDateTime start, java.time.LocalDateTime end);
+
+    @org.springframework.data.jpa.repository.Query("SELECT s FROM Sale s WHERE " +
+           "s.saleDate BETWEEN :start AND :end " +
+           "AND (:storeId IS NULL OR s.storeId = :storeId) " +
+           "AND (" +
+           "   (:searchPattern IS NULL AND :searchId IS NULL) " + 
+           "   OR (:searchPattern IS NOT NULL AND LOWER(s.cashierName) LIKE :searchPattern) " +
+           "   OR (:searchId IS NOT NULL AND s.id = :searchId)" +
+           ") " +
+           "AND (:status = 'ALL' " +
+           "     OR (:status = 'EXCHANGE' AND EXISTS (SELECT v FROM SaleVersion v WHERE v.sale.id = s.id)) " +
+           "     OR (:status = 'RETURN' AND EXISTS (SELECT d FROM DamageItem d WHERE d.originalSaleId = s.id)) " +
+           "     OR (:status = 'NEW' " +
+           "         AND NOT EXISTS (SELECT v FROM SaleVersion v WHERE v.sale.id = s.id) " +
+           "         AND NOT EXISTS (SELECT d FROM DamageItem d WHERE d.originalSaleId = s.id)) " +
+           ") " +
+           "ORDER BY s.saleDate DESC")
+    org.springframework.data.domain.Page<Sale> findDailySales(
+            java.time.LocalDateTime start, 
+            java.time.LocalDateTime end, 
+            Long storeId, 
+            String searchPattern, 
+            Long searchId,
+            String status, 
+            org.springframework.data.domain.Pageable pageable);
 }

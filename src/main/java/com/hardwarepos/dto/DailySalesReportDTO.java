@@ -13,5 +13,11 @@ public class DailySalesReportDTO {
     private Double totalProfit;
     private Integer totalBills;
     private Integer totalReturns; // Count of bills with returns
+    
+    // Pagination Metadata
+    private Integer currentPage;
+    private Integer totalPages;
+    private Long totalElements;
+    
     private List<BillReportDTO> bills;
 }

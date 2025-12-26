@@ -25,28 +25,19 @@ public class ReportController {
     @GetMapping("/daily-sales")
     public ResponseEntity<DailySalesReportDTO> getDailySalesReport(
             @RequestParam("date") @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate date,
-            @RequestParam(required = false) Long storeId) {
+            @RequestParam(required = false) Long storeId,
+            @RequestParam(defaultValue = "0") int page,
+            @RequestParam(defaultValue = "5") int size,
+            @RequestParam(required = false, defaultValue = "") String search,
+            @RequestParam(required = false, defaultValue = "ALL") String status) {
         
         User user = securityService.getAuthenticatedUser();
-        // Security check: Only OWNER or STORE_ADMIN should see full reports? 
-        // Assuming Report Page is restricted to OWNER/STORE_ADMIN in frontend.
-        // Backend check:
-        // Owner can see any store (if storeId param provided), or all.
-        // Link to ReportService: currently implementation takes storeId.
-        
         Long effectiveStoreId = storeId;
         if (user.getRole() != User.Role.OWNER) {
-            // Force user's store ID if not Owner
             effectiveStoreId = user.getStoreId();
         } 
-        // If Owner and storeId is null -> Reports for ALL stores aggregated?
-        // Service implementation handles find logic. 
-        // If null passed to repo method, it might crash if using 'findAllByStoreId...'.
-        // ReportService logic: 
-        // if (storeId != null) findAllByStoreId... else findAll...
-        // So Owner passing null gets Global Report. Correct.
 
-        DailySalesReportDTO report = reportService.getDailySalesReport(date, effectiveStoreId);
+        DailySalesReportDTO report = reportService.getDailySalesReport(date, effectiveStoreId, page, size, search, status);
         return ResponseEntity.ok(report);
     }
     @GetMapping("/profit-summary")

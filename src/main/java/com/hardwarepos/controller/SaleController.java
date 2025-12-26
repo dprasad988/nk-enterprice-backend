@@ -57,4 +57,8 @@ public class SaleController {
     ) {
         return saleService.getSaleLogs(securityService.getAuthenticatedUser(), page, size, startDate, endDate, storeId);
     }
+    @GetMapping("/{id}/versions")
+    public List<com.hardwarepos.entity.SaleVersion> getSaleVersions(@PathVariable Long id) {
+        return saleService.getSaleVersions(id);
+    }
 }
